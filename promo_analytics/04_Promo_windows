@@ -1,0 +1,549 @@
+# ============================================
+# 04_promo_windows.py
+#
+# Builds promotional time windows for
+# before, during and after analysis.
+#
+# Business Problem:
+# For each promotion we need to calculate
+# performance metrics across 3 periods:
+#
+# BEFORE:  Same duration before promo starts
+#          Used as baseline comparison
+#
+# DURING:  The actual promotion period
+#          Core promotional performance
+#
+# AFTER:   Same duration after promo ends
+#          Measures retention effect
+#
+# Window Rule:
+# If promo ran for 12 weeks:
+# → Before window = 12 weeks before start
+# → During window = the 12 week promo
+# → After window  = 12 weeks after end
+#
+# Data Availability Rules:
+# → Before window must start >= 2025-01-01
+#   (our data start date)
+# → After window must start <= today
+#   (cannot use future data)
+# ============================================
+
+from pyspark.sql import functions as F
+from pyspark.sql import DataFrame
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.getOrCreate()
+
+# ============================================
+# CONFIGURATION
+# ============================================
+
+DATA_START = F.lit("2025-01-01").cast("date")
+TODAY = F.current_date()
+
+
+# ============================================
+# STEP 1 — BUILD PROMO RESULT
+# Get true start and end dates for
+# each outlet + brand + promotion
+# ============================================
+
+def build_promo_result(
+    df_joined: DataFrame
+) -> DataFrame:
+    """
+    Groups joined loyalty and promo data
+    to get true promotional dates per
+    outlet, brand and promotion.
+
+    Why min/max aggregation?
+    The promotion rate dates in the
+    source table can have multiple rows
+    per promotion. We take:
+    → min(RateStartDate) = true start
+    → max(RateEndDate)   = true end
+
+    This gives us the full span of
+    each promotion at outlet level.
+
+    Also calculates DurationWeeks
+    for reporting purposes.
+
+    Args:
+        df_joined: Joined DataFrame of
+            loyalty scan and promo tables
+
+    Returns:
+        DataFrame with one row per
+        outlet + brand + promotion
+        with true start/end dates
+        and duration in weeks
+
+    Output columns:
+    → OutletIdentifier
+    → PromotionName
+    → ReportingBrandName
+    → PromoTrueStartDate (integer yyyyMMdd)
+    → PromoTrueEndDate   (integer yyyyMMdd)
+    → PromoTrueStartDate_dt (date type)
+    → PromoTrueEndDate_dt   (date type)
+    → DurationWeeks (integer)
+    """
+    return df_joined \
+        .groupBy(
+            "OutletIdentifier",
+            "PromotionName",
+            "ReportingBrandName"
+        ).agg(
+            F.min("PromotionRateStartDateKey")
+             .alias("PromoTrueStartDate"),
+            F.max("PromotionRateEndDateKey")
+             .alias("PromoTrueEndDate")
+        ).withColumn(
+            "PromoTrueStartDate_dt",
+            F.to_date(
+                F.col("PromoTrueStartDate")
+                 .cast("string"),
+                "yyyyMMdd"
+            )
+        ).withColumn(
+            "PromoTrueEndDate_dt",
+            F.to_date(
+                F.col("PromoTrueEndDate")
+                 .cast("string"),
+                "yyyyMMdd"
+            )
+        ).withColumn(
+            "DurationWeeks",
+            (
+                F.datediff(
+                    F.col("PromoTrueEndDate_dt"),
+                    F.col("PromoTrueStartDate_dt")
+                ) / 7
+            ).cast("int")
+        )
+
+
+# ============================================
+# STEP 2 — ADD PROMO DURATION
+# Calculate exact duration in days
+# More precise than DurationWeeks
+# ============================================
+
+def add_promo_duration(
+    df: DataFrame
+) -> DataFrame:
+    """
+    Adds exact promo duration in days.
+
+    Why days not weeks?
+    DurationWeeks truncates decimals.
+    Example: 13.5 weeks becomes 13
+    losing 3.5 days of precision.
+
+    Using exact days ensures before
+    and after windows are perfectly
+    symmetrical to the promo period.
+
+    Formula:
+    duration = end_date - start_date + 1
+    (+1 to include both start and end day)
+
+    Example:
+    Start: 2025-03-30
+    End:   2025-06-28
+    Days:  91 (inclusive)
+
+    Args:
+        df: Promo result DataFrame with
+            PromoTrueStartDate_dt and
+            PromoTrueEndDate_dt columns
+
+    Returns:
+        DataFrame with promo_duration_days
+        column added
+    """
+    return df.withColumn(
+        "promo_duration_days",
+        F.datediff(
+            F.col("PromoTrueEndDate_dt"),
+            F.col("PromoTrueStartDate_dt")
+        ) + 1
+    )
+
+
+# ============================================
+# STEP 3 — CALCULATE CANDIDATE WINDOWS
+# Calculate before and after windows
+# based on exact promo duration
+# ============================================
+
+def add_before_candidate_window(
+    df: DataFrame
+) -> DataFrame:
+    """
+    Calculates candidate before window.
+
+    Before window definition:
+    → Start: promo_start - duration_days
+    → End:   promo_start - 1 day
+
+    Example:
+    Promo start:          2025-03-30
+    Promo duration:       91 days
+    Before window start:  2024-12-29
+    Before window end:    2025-03-29
+
+    Note: This is a CANDIDATE window.
+    It becomes the actual window only
+    if data is available (>= 2025-01-01)
+    AND no other promo is running.
+    (overlap check in 05_overlap_detection)
+
+    Args:
+        df: DataFrame with
+            PromoTrueStartDate_dt and
+            promo_duration_days columns
+
+    Returns:
+        DataFrame with before candidate
+        window columns added
+    """
+    return df \
+        .withColumn(
+            "before_candidate_start",
+            F.date_sub(
+                F.col("PromoTrueStartDate_dt"),
+                F.col("promo_duration_days")
+            )
+        ).withColumn(
+            "before_candidate_end",
+            F.date_sub(
+                F.col("PromoTrueStartDate_dt"),
+                1
+            )
+        )
+
+
+def add_after_candidate_window(
+    df: DataFrame
+) -> DataFrame:
+    """
+    Calculates candidate after window.
+
+    After window definition:
+    → Start: promo_end + 1 day
+    → End:   promo_end + duration_days
+
+    Example:
+    Promo end:            2025-06-28
+    Promo duration:       91 days
+    After window start:   2025-06-29
+    After window end:     2025-09-27
+
+    Note: This is a CANDIDATE window.
+    It becomes actual window only if:
+    → Window start <= today
+      (data must be available)
+    AND no other promo is running.
+    (overlap check in 05_overlap_detection)
+
+    After window end is clipped to today
+    if it extends into the future.
+
+    Args:
+        df: DataFrame with
+            PromoTrueEndDate_dt and
+            promo_duration_days columns
+
+    Returns:
+        DataFrame with after candidate
+        window columns added
+    """
+    return df \
+        .withColumn(
+            "after_candidate_start",
+            F.date_add(
+                F.col("PromoTrueEndDate_dt"),
+                1
+            )
+        ).withColumn(
+            "after_candidate_end",
+            F.date_add(
+                F.col("PromoTrueEndDate_dt"),
+                F.col("promo_duration_days")
+            )
+        )
+
+
+# ============================================
+# STEP 4 — CHECK DATA AVAILABILITY
+# Verify windows fall within
+# available data range
+# ============================================
+
+def add_data_availability_flags(
+    df: DataFrame
+) -> DataFrame:
+    """
+    Adds flags to check if candidate
+    windows fall within available data.
+
+    before_data_ok:
+    → True if before window start
+      >= our data start date (2025-01-01)
+    → False if window extends before
+      our earliest available data
+
+    after_data_ok:
+    → True if after window has started
+      (after_candidate_start <= today)
+    → False if promotion just ended
+      and no after data exists yet
+
+    Args:
+        df: DataFrame with candidate
+            window columns added
+
+    Returns:
+        DataFrame with data availability
+        flag columns added
+    """
+    return df \
+        .withColumn(
+            "before_data_ok",
+            F.col("before_candidate_start")
+             >= DATA_START
+        ).withColumn(
+            "after_data_ok",
+            F.col("after_candidate_start")
+             <= TODAY
+        )
+
+
+# ============================================
+# MAIN FUNCTION
+# Builds complete promo windows
+# ============================================
+
+def build_promo_windows(
+    df_joined: DataFrame
+) -> DataFrame:
+    """
+    Complete promo window calculation
+    pipeline.
+
+    Steps:
+    1. Build promo result
+       (group to get true dates)
+    2. Add exact duration in days
+    3. Calculate before candidate window
+    4. Calculate after candidate window
+    5. Add data availability flags
+
+    Note: Overlap detection is handled
+    separately in 05_overlap_detection.py
+
+    Args:
+        df_joined: Joined DataFrame of
+            loyalty and promo data
+
+    Returns:
+        DataFrame with one row per
+        outlet + brand + promotion
+        with all window columns
+
+    Output columns:
+    → OutletIdentifier
+    → PromotionName
+    → ReportingBrandName
+    → PromoTrueStartDate_dt
+    → PromoTrueEndDate_dt
+    → DurationWeeks
+    → promo_duration_days
+    → before_candidate_start
+    → before_candidate_end
+    → after_candidate_start
+    → after_candidate_end
+    → before_data_ok
+    → after_data_ok
+    """
+    return build_promo_result(df_joined) \
+        .transform(add_promo_duration) \
+        .transform(add_before_candidate_window) \
+        .transform(add_after_candidate_window) \
+        .transform(add_data_availability_flags)
+
+
+# ============================================
+# VALIDATION
+# ============================================
+
+def validate_promo_windows(
+    df: DataFrame
+) -> DataFrame:
+    """
+    Validates promo window calculations.
+
+    Checks:
+    → No negative durations
+    → Start date before end date
+    → Before window end < promo start
+    → After window start > promo end
+    → Duration days > 0
+
+    Args:
+        df: DataFrame with promo
+            windows calculated
+
+    Returns:
+        Same DataFrame if checks pass
+        Raises AssertionError if fail
+    """
+    print("\nValidating promo windows...")
+
+    # Check 1 — No negative durations
+    neg_duration = df.filter(
+        F.col("promo_duration_days") <= 0
+    ).count()
+    assert neg_duration == 0, \
+        f"Negative durations: {neg_duration}"
+    print(f"Negative durations: {neg_duration} ✅")
+
+    # Check 2 — Start before end
+    invalid_dates = df.filter(
+        F.col("PromoTrueStartDate_dt") >
+        F.col("PromoTrueEndDate_dt")
+    ).count()
+    assert invalid_dates == 0, \
+        f"Invalid date ranges: {invalid_dates}"
+    print(f"Invalid date ranges: {invalid_dates} ✅")
+
+    # Check 3 — Before window ends
+    # before promo starts
+    invalid_before = df.filter(
+        F.col("before_candidate_end") >=
+        F.col("PromoTrueStartDate_dt")
+    ).count()
+    assert invalid_before == 0, \
+        f"Invalid before windows: {invalid_before}"
+    print(
+        f"Invalid before windows: "
+        f"{invalid_before} ✅"
+    )
+
+    # Check 4 — After window starts
+    # after promo ends
+    invalid_after = df.filter(
+        F.col("after_candidate_start") <=
+        F.col("PromoTrueEndDate_dt")
+    ).count()
+    assert invalid_after == 0, \
+        f"Invalid after windows: {invalid_after}"
+    print(
+        f"Invalid after windows: "
+        f"{invalid_after} ✅"
+    )
+
+    print("All window validations passed! ✅")
+    return df
+
+
+# ============================================
+# SUMMARY
+# ============================================
+
+def promo_windows_summary(
+    df: DataFrame
+) -> None:
+    """
+    Prints summary of promo windows
+    for QA purposes.
+
+    Shows:
+    → Total promotions
+    → Average promo duration
+    → Min/max promo duration
+    → Promotions with valid before data
+    → Promotions with valid after data
+
+    Args:
+        df: DataFrame with promo
+            windows calculated
+    """
+    total = df.count()
+    before_ok = df.filter(
+        F.col("before_data_ok") == True
+    ).count()
+    after_ok = df.filter(
+        F.col("after_data_ok") == True
+    ).count()
+
+    stats = df.agg(
+        F.avg("promo_duration_days")
+         .alias("avg_days"),
+        F.min("promo_duration_days")
+         .alias("min_days"),
+        F.max("promo_duration_days")
+         .alias("max_days")
+    ).collect()[0]
+
+    print("\n=== Promo Windows Summary ===")
+    print(f"Total promotions:      {total:,}")
+    print(
+        f"Avg duration:          "
+        f"{stats['avg_days']:.0f} days"
+    )
+    print(
+        f"Min duration:          "
+        f"{stats['min_days']} days"
+    )
+    print(
+        f"Max duration:          "
+        f"{stats['max_days']} days"
+    )
+    print(
+        f"Valid before data:     "
+        f"{before_ok:,} "
+        f"({before_ok/total*100:.1f}%)"
+    )
+    print(
+        f"Valid after data:      "
+        f"{after_ok:,} "
+        f"({after_ok/total*100:.1f}%)"
+    )
+    print("=============================")
+
+
+# ============================================
+# USAGE EXAMPLE
+# ============================================
+
+if __name__ == "__main__":
+
+    print("Building promo windows...")
+
+    # Build complete promo windows
+    # Assumes df_joined already created
+    # from previous pipeline steps
+    result_dur = build_promo_windows(
+        df_joined
+    )
+
+    # Cache — used in next steps
+    result_dur.cache()
+    print(f"Promo windows built ✅")
+    print(f"Total promos: {result_dur.count():,}")
+
+    # Validate
+    result_dur = validate_promo_windows(
+        result_dur
+    )
+
+    # Print summary
+    promo_windows_summary(result_dur)
+
+    print("\nReady for overlap detection ✅")
+   
