@@ -28,16 +28,7 @@ DATE_FILTER = 20250101
 # ============================================
 # LOAD FUNCTIONS
 # ============================================
-
-def load_scan_table() -> DataFrame:
-    """
-    Loads main transaction scan table.
-    Contains all outlet level sales
-    transactions with loyalty information.
-
-    Filters:
-    → DateKey >= 2025-01-01
-
+""" Loads main transaction scan table. Contains all outlet level sales transactions with loyalty information. Filters: DateKey >= 2025-01-01
     Key columns:
     → OutletKey: outlet identifier
     → ProductKey: product identifier
@@ -53,6 +44,7 @@ def load_scan_table() -> DataFrame:
     → ManufacturerMultipackValue: MP manuf value
     → CouponDiscountValue: coupon discount
     """
+def load_scan_table() -> DataFrame:
     return spark.table(
         "your_database.fact_scan_transactions"
     ).select(
@@ -76,16 +68,10 @@ def load_scan_table() -> DataFrame:
         F.col("DateKey") >= DATE_FILTER
     )
 
-
-def load_outlet_table() -> DataFrame:
-    """
-    Loads outlet dimension table.
-    Contains store/outlet information.
-
-    Filters:
+""" Loads outlet dimension table. Contains store/outlet information.
+Filters:
     → ActiveFlag = A (active outlets only)
     → SourceSystem = your source system
-
     Key columns:
     → OutletKey: join key
     → OutletIdentifier: unique outlet ID
@@ -94,6 +80,7 @@ def load_outlet_table() -> DataFrame:
     → ChainId: retail chain ID
     → ChainName: retail chain name
     """
+def load_outlet_table() -> DataFrame:
     return spark.table(
         "your_database.dim_outlet"
     ).filter(
@@ -108,12 +95,7 @@ def load_outlet_table() -> DataFrame:
         "ChainName"
     )
 
-
-def load_product_table() -> DataFrame:
-    """
-    Loads product dimension table.
-    Filtered to specific product category.
-
+ """ Loads product dimension table. Filtered to specific product category.
     Filters:
     → Category = target category
     → ActiveFlag = A
@@ -130,6 +112,7 @@ def load_product_table() -> DataFrame:
     → IscompanyFlag: company product flag
     → EVPSegmentName: segment name
     """
+def load_product_table() -> DataFrame:
     return spark.table(
         "your_database.dim_product"
     ).filter(
@@ -154,13 +137,7 @@ def load_product_table() -> DataFrame:
         "EVPSegmentName",
         "ReportingBrandName"
     )
-
-
-def load_date_table() -> DataFrame:
-    """
-    Loads date dimension table.
-    Used for week level aggregations.
-
+""" Loads date dimension table. Used for week level aggregations.
     Key columns:
     → DateKey: join key
     → WeekStartDate: week start
@@ -168,6 +145,8 @@ def load_date_table() -> DataFrame:
     → CalendarYearNumber: year
     → CalendarYearMonthNumber: year month
     """
+
+def load_date_table() -> DataFrame:
     return spark.table(
         "your_database.dim_date"
     ).select(
@@ -178,17 +157,12 @@ def load_date_table() -> DataFrame:
         "CalendarYearMonthNumber"
     )
 
-
-def load_outlet_reference_table() -> DataFrame:
-    """
-    Loads secondary outlet reference table
-    for additional outlet matching.
-    Used for your_source system outlets.
-
+""" Loads secondary outlet reference table for additional outlet matching. Used for your_source system outlets.
     Filters:
     → SourceSystem = your_source
     → ActiveFlag = A
     """
+def load_outlet_reference_table() -> DataFrame:
     return spark.table(
         "your_database.dim_outlet_reference"
     ).filter(
@@ -199,15 +173,11 @@ def load_outlet_reference_table() -> DataFrame:
         "OutletIdentifier"
     ).distinct()
 
-
-def load_outlet_your_source_table() -> DataFrame:
-    """
-    Loads your_source outlet reference table.
-    Used for regional outlet matching.
-
+""" Loads your_source outlet reference table. Used for regional outlet matching.
     Filters:
     → SourceSystem = your_source
     """
+def load_outlet_your_source_table() -> DataFrame:
     return spark.table(
         "your_database.dim_outlet_reference"
     ).filter(
@@ -217,16 +187,12 @@ def load_outlet_your_source_table() -> DataFrame:
         "State"
     ).distinct()
 
-
-def load_product_reference_table() -> DataFrame:
-    """
-    Loads product reference table
-    for your_source system products.
-
+ """ Loads product reference table for your_source system products.
     Filters:
     → SourceSystem = your_source
     → ActiveFlag = A
     """
+def load_product_reference_table() -> DataFrame:
     return spark.table(
         "your_database.dim_product_reference"
     ).filter(
@@ -238,14 +204,11 @@ def load_product_reference_table() -> DataFrame:
         "ExternalBrandCode"
     ).distinct()
 
-
-def load_product_your_source_table() -> DataFrame:
-    """
-    Loads your_source product reference table.
-
+""" Loads your_source product reference table.
     Filters:
     → SourceSystem = your_source system
     """
+def load_product_your_source_table() -> DataFrame:
     return spark.table(
         "your_database.dim_product_reference"
     ).filter(
@@ -255,12 +218,7 @@ def load_product_your_source_table() -> DataFrame:
         "BrandVariant"
     ).distinct()
 
-
-def load_promo_hierarchy() -> DataFrame:
-    """
-    Loads promotion hierarchy table.
-    Contains outlet level promo assignments.
-
+""" Loads promotion hierarchy table. Contains outlet level promo assignments.
     Key columns:
     → DateKey: date of promotion
     → OutletKey: outlet identifier
@@ -269,16 +227,12 @@ def load_promo_hierarchy() -> DataFrame:
     → PromotionSubCategory: sub type
     → DiscountLevel: discount amount
     """
+def load_promo_hierarchy() -> DataFrame:
     return spark.table(
         "your_database.promo_hierarchy"
     )
 
-
-def load_promo_master() -> DataFrame:
-    """
-    Loads promotion master table.
-    Contains promotion metadata.
-
+""" Loads promotion master table. Contains promotion metadata.
     Filters:
     → ActiveFlag = A
     → PromotionStatus in
@@ -295,6 +249,7 @@ def load_promo_master() -> DataFrame:
     → TargetGeography: target geography
     → TargetSegmentation: target segment
     """
+def load_promo_master() -> DataFrame:
     return spark.table(
         "your_database.dim_promotion"
     ).filter(
@@ -323,20 +278,16 @@ def load_promo_master() -> DataFrame:
 # LOAD SAVED TABLES
 # (Built in previous pipeline run)
 # ============================================
-
-def load_loyalty_scan() -> DataFrame:
-    """
+"""
     Loads pre-built loyalty scan table.
     Contains cleaned loyalty transactions
     with derived loyalty codes.
     """
+def load_loyalty_scan() -> DataFrame:
     return spark.table(
         "your_schema.loyalty_scan"
     )
-
-
-def load_single_promo() -> DataFrame:
-    """
+"""
     Loads pre-built promotion table.
     Contains promotion assignments
     at outlet and brand level.
@@ -344,6 +295,7 @@ def load_single_promo() -> DataFrame:
     Filters:
     → DateKey >= 2025-01-01
     """
+def load_single_promo() -> DataFrame:
     return spark.table(
         "your_schema.single_promo"
     ).select(
